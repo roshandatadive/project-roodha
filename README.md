@@ -1,4 +1,4 @@
-# project-roodha
+# JobWork Planner – Product Requirement
 
 “Make every small Indian job-work unit as predictable, reliable, and data-driven as a large OEM plant.”
 
