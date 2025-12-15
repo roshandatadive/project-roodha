@@ -1,168 +1,102 @@
-JobWork Planner – S3 Application Storage (IaC)
-Overview
+JobWork Planner – Secure S3 Storage (Infrastructure as Code)
 
+Overview
 This module provisions a secure, private Amazon S3 bucket using AWS CDK (Python) for the JobWork Planner SaaS application.
 
-The bucket is designed to store application-owned files only, such as:
+The bucket is used only for application data such as Purchase Orders (POs), part drawings, and CSV exports.
+The infrastructure is created using Infrastructure as Code (IaC) to ensure consistency, security, and production readiness across environments.
 
-Purchase Orders (POs)
+Why Amazon S3
+Amazon S3 was chosen because it provides highly durable and scalable object storage, strong security controls using IAM, native support for browser uploads via pre-signed URLs, and lifecycle policies for cost optimization.
+This makes S3 suitable for a multi-tenant SaaS application.
 
-Part drawings
+Security Model
+The S3 bucket is completely private.
+All public access is blocked using AWS public access block settings.
+Server-side encryption (AES-256) is enabled.
+HTTPS is enforced for all requests.
 
-CSV exports and reports
+As a result, no file is publicly accessible and only the application can access the bucket.
 
-The infrastructure is created using Infrastructure as Code (IaC) to ensure:
-
-Consistency across environments
-
-Security by default
-
-Production readiness
-
-Why Amazon S3?
-
-Amazon S3 was chosen because it provides:
-
-Highly durable and scalable object storage
-
-Native support for private buckets
-
-Tight integration with IAM roles
-
-Support for pre-signed URLs (secure browser uploads)
-
-Lifecycle policies for cost optimization
-
-This makes it ideal for a multi-tenant SaaS application.
-
-Key Design Principles
-1. Private-by-Default Security
-
-The S3 bucket is NOT public
-
-All public access is blocked using:
-
-Block Public ACLs
-
-Block Public Policies
-
-Restrict Public Buckets
-
-HTTPS is enforced for all requests
-
-Result:
-Only the application can access the bucket.
-
-2. IAM Role–Based Access (No Access Keys)
-
-The bucket is accessed only via IAM roles
-
+Access Control Using IAM Roles
+The application accesses S3 using IAM roles only, without access keys.
 Two roles are created:
 
-Lambda Role – for backend APIs
+Lambda role for backend APIs
 
-EC2 Role – for app servers
+EC2 role for application servers
 
-No access keys are stored anywhere
+Each role follows the principle of least privilege and is allowed to list the bucket and get, put, or delete objects.
 
-Result:
-Follows AWS security best practices.
-
-3. Multi-Tenant Object Key Strategy
-
-Files are stored using the following prefix structure:
+Multi-Tenant Object Structure
+All files follow this object key structure:
 
 tenant_id/module/yyyy/mm/dd/filename
 
-
 Example:
-
 T001/uploads/2025/12/10/po_1234.pdf
 
+This structure ensures tenant isolation, easy filtering, and scalability.
 
-This ensures:
+Browser Uploads Using Pre-Signed URLs
+The bucket supports browser uploads using pre-signed PUT URLs.
+CORS is configured to allow PUT, GET, and HEAD methods.
 
-Clear tenant isolation
-
-Easy filtering and reporting
-
-Scalability for future analytics
-
-4. Browser Uploads Using Pre-Signed URLs
-
-The bucket allows PUT operations via pre-signed URLs
-
-CORS is configured to allow:
-
-PUT, GET, HEAD
-
-Files can be uploaded directly from the browser without exposing AWS credentials
-
-Flow:
+Upload flow:
 
 Backend generates a pre-signed URL
 
-Browser uploads file directly to S3
+Browser uploads the file directly to S3
 
 Backend never handles raw file data
 
-5. Versioning & Lifecycle Management
-
-Versioning is enabled
-
-Protects against accidental overwrites/deletes
-
-Lifecycle rules
-
-Transition files to cheaper storage after 30 days
-
-Expire files after 365 days (configurable)
-
-Result:
-Cost-efficient long-term storage.
+Versioning and Lifecycle Management
+Bucket versioning is enabled to protect against accidental deletion or overwrite.
+Lifecycle rules are configured to transition objects to cheaper storage after 30 days and optionally expire them after 365 days.
 
 What This Stack Creates
 
-✅ Private S3 bucket for app files
+A private S3 bucket for application files
 
-✅ CORS configuration for browser uploads
+IAM roles for EC2 and Lambda access
 
-✅ IAM roles with least-privilege access
+CORS configuration for browser uploads
 
-✅ Encryption at rest (AES-256)
+Encryption at rest
 
-✅ Versioning enabled
+Versioning enabled
 
-✅ Lifecycle policies
+Lifecycle rules for cost optimization
 
-✅ CloudFormation outputs for integration
+CloudFormation outputs for integration
 
 Project Structure
-jobwork-s3-iac/
-│
-├── app.py                     # CDK app entry point
-├── s3_bucket_stack.py          # S3 bucket + IAM roles definition
-├── presign_upload_test.py      # Pre-signed URL upload test script
-├── requirements.txt
-├── cdk.json
-├── README.md
-└── jobwork_s3_iac/
+jobwork-s3-iac
 
-Deployment Instructions
-1. Install dependencies
-pip install -r requirements.txt
+app.py
 
-2. Bootstrap CDK (one-time per account/region)
-cdk bootstrap aws://<account-id>/<region>
+s3_bucket_stack.py
 
-3. Deploy the stack
-cdk deploy S3BucketStack
+presign_upload_test.py
+
+cdk.json
+
+requirements.txt
+
+README.md
+
+Deployment Steps
+
+Install dependencies using pip install -r requirements.txt
+
+Bootstrap CDK using cdk bootstrap aws://account-id/region
+
+Deploy the stack using cdk deploy S3BucketStack
 
 Validation Performed
+After deployment, the following were verified:
 
-The following were verified after deployment:
-
-Bucket exists in correct region
+Bucket exists in the correct region
 
 Public access is fully blocked
 
@@ -176,36 +110,11 @@ IAM roles have correct permissions
 
 Pre-signed URL upload works successfully
 
-How This Fits Into the JobWork Planner System
-
-Acts as the central file storage layer
-
-Works with:
-
-EC2 / Lambda backend
-
-DynamoDB (metadata)
-
-CloudFront (optional, future)
-
-Designed for:
-
-Multi-tenant SaaS
-
-Secure browser uploads
-
-Production workloads
-
-Notes
-
-No application data is public
-
-No secrets or credentials are stored in code
-
-Infrastructure is fully reproducible via CDK
+How This Fits into JobWork Planner
+This bucket acts as the central storage layer for the application.
+It integrates with EC2 and Lambda backends and is designed for secure, multi-tenant SaaS usage in production.
 
 Author
-
 Roshan Sah
-Intern – Data Engineering / Cloud
+Intern – Cloud / Data Engineering
 JobWork Planner Project
