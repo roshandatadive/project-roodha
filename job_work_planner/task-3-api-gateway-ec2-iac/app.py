@@ -19,11 +19,13 @@ ec2_stack = Ec2Stack(
 )
  
 # API Gateway
-ApiGatewayStack(
+api_gateway_stack = ApiGatewayStack(
     app,
     "ApiGatewayStack",
-    backend_url=f"http://{ec2_stack.ec2_public_ip}",
-    env=env,
+    ec2_public_ip=ec2_stack.ec2_public_ip,
+    env=env
 )
+ 
+api_gateway_stack.add_dependency(ec2_stack)
  
 app.synth()
