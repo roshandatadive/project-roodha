@@ -1,10 +1,13 @@
 from fastapi import FastAPI
+from app.routes import system, auth
+from app.core.auth_middleware import JWTAuthMiddleware
  
-# Import system routes (health, ready, me, tenant)
-from app.routes import system,auth
- 
-# Create FastAPI application
+# Create FastAPI app
 app = FastAPI(title="JobWork Backend Skeleton")
  
-# Register system routes
+# Register middleware
+app.middleware("http")(JWTAuthMiddleware(app))
+ 
+# Register routes
 app.include_router(system.router)
+app.include_router(auth.router)
