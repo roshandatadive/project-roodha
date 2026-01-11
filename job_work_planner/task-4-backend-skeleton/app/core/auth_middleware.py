@@ -1,72 +1,50 @@
 """
 auth_middleware.py
 ------------------
-This file contains JWT authentication middleware.
+Mock JWT authentication middleware.
  
-What this middleware does:
-1. Runs BEFORE every API request
-2. Skips public endpoints like /health
-3. Validates Authorization header
-4. Rejects invalid or missing tokens
-5. Attaches user info to request.state
+Responsibilities:
+- Allow /health without auth
+- Require Authorization header for all other routes
+- Attach user + tenant context to request.state
 """
  
-from fastapi import Request
-from fastapi.responses import JSONResponse
- 
+from fastapi import Request, HTTPException
  
 class JWTAuthMiddleware:
-    """
-    This middleware acts like a SECURITY GUARD.
- 
-    Every request must pass through this guard
-    before reaching any API route.
-    """
- 
     def __init__(self, app):
         self.app = app
  
     async def __call__(self, request: Request, call_next):
-        """
-        This function is automatically called for every request.
-        """
- 
-        # 1️⃣ Allow PUBLIC endpoints without JWT
-        if request.url.path in ["/health"]:
+        # Public endpoint
+        if request.url.path == "/health":
             return await call_next(request)
  
-        # 2️⃣ Read Authorization header
         auth_header = request.headers.get("Authorization")
  
         if not auth_header:
-            return JSONResponse(
-                status_code=401,
-                content={"detail": "Authorization header missing"},
-            )
+            raise HTTPException(status_code=401, detail="Authorization header missing")
  
-        # 3️⃣ Validate Bearer token format
         if not auth_header.startswith("Bearer "):
-            return JSONResponse(
-                status_code=401,
-                content={"detail": "Invalid Authorization header format"},
-            )
+            raise HTTPException(status_code=401, detail="Invalid Authorization header")
  
-        # 4️⃣ Extract token
         token = auth_header.replace("Bearer ", "")
  
-        # 5️⃣ MOCK token validation (Cognito will come later)
-        if token == "" or token == "invalid":
-            return JSONResponse(
-                status_code=401,
-                content={"detail": "Invalid or expired token"},
-            )
+        # -----------------------------
+        # MOCK JWT DECODE (for now)
+        # -----------------------------
+        # In real life:
+        # - Verify signature with Cognito JWKs
+        # - Validate expiry, issuer, audience
+        # -----------------------------
  
-        # 6️⃣ Attach user info to request (DOWNSTREAM USE)
         request.state.user = {
             "user_id": "mock-user-id",
             "email": "mock.user@jobwork.com",
+            "tenant_id": "tenant-1",     # ✅ REQUIRED FIX
+            "role": "OWNER"              # needed later for RBAC
         }
  
-        # 7️⃣ Allow request to proceed
         response = await call_next(request)
         return response
+ 
