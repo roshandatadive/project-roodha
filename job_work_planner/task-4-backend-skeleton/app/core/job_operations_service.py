@@ -1,126 +1,140 @@
 """
 job_operations_service.py
 -------------------------
- 
-This file contains business logic for creating job operations
-from a Part's default operation route.
- 
+
+SCRUM 25 – Auto Generate Job Operations
+
+Responsibilities:
+- Read Part default operation route
+- Validate route + tenant isolation
+- Create job_operations atomically
+- Rollback on failure
+- Write audit log entry: JOB_ROUTE_CREATED
+
 IMPORTANT:
-- This is NOT an API
-- This is a service function
-- It will be called when a Job is created
+- This is a SERVICE, not an API
 """
- 
+
 from typing import List, Dict
-from uuid import uuid4
- 
- 
+import logging
+
+logger = logging.getLogger("jobwork-backend")
+
 # -----------------------------
-# Mock database tables (TEMP)
+# MOCK DATABASE TABLES
+# (Replace with DynamoDB later)
 # -----------------------------
- 
-# Simulating Part table
+
 PARTS_TABLE = {
     "part-1": {
         "part_id": "part-1",
         "tenant_id": "tenant-1",
-        "default_operations_route": ["op-cut", "op-drill", "op-paint"]
+        "default_operations_route": ["op-cut", "op-drill", "op-paint"],
     }
 }
- 
-# Simulating Operations master table
+
 OPERATIONS_TABLE = {
     "op-cut": {"operation_id": "op-cut", "name": "Cut"},
     "op-drill": {"operation_id": "op-drill", "name": "Drill"},
     "op-paint": {"operation_id": "op-paint", "name": "Paint"},
 }
- 
-# Simulating Job Operations table
-JOB_OPERATIONS_TABLE: List[Dict] = {}
 
-
-
+# job_operation_id -> record
+JOB_OPERATIONS_TABLE: Dict[str, Dict] = {}
 
 # -------------------------------------------------------
-# Route Validation Logic (STEP 2)
+# STEP 1: Route Validation
 # -------------------------------------------------------
- 
-def validate_part_route(part_id: str, tenant_id: str):
+
+def validate_part_route(part_id: str, tenant_id: str) -> List[str]:
     """
-    Validates the default operation route for a given Part.
- 
-    What this function guarantees:
-    1. Part exists
-    2. Route is not empty
-    3. All operation IDs in the route exist
+    Validates Part default operation route.
+
+    Guarantees:
+    - Part exists
+    - Part belongs to tenant
+    - Route is not empty
+    - All operation IDs exist
     """
- 
-    # 1️⃣ Fetch part
+
     part = PARTS_TABLE.get(part_id)
- 
     if not part:
         raise ValueError("Part does not exist")
- 
+
     if part["tenant_id"] != tenant_id:
         raise ValueError("Part does not belong to tenant")
- 
-    # 2️⃣ Read route
+
     route = part.get("default_operations_route")
- 
-    if not route or len(route) == 0:
+    if not route:
         raise ValueError("Part has no operation route defined")
- 
-    # 3️⃣ Validate each operation
+
     for op_id in route:
         if op_id not in OPERATIONS_TABLE:
             raise ValueError(f"Invalid operation in route: {op_id}")
- 
-    # 4️⃣ If everything is valid, return route
+
     return route
 
 
+# -------------------------------------------------------
+# STEP 2: Job Operation Creation (ATOMIC)
+# -------------------------------------------------------
 
-# -------------------------------------------------------
-# Job Operation Creation Logic (STEP 3 - ATOMIC)
-# -------------------------------------------------------
- 
-def create_job_operations(job_id: str, part_id: str, tenant_id: str):
+def create_job_operations(job_id: str, part_id: str, tenant_id: str) -> List[Dict]:
     """
-    Creates job_operations for a job based on Part route.
- 
+    Creates job operations from part route.
+
     Atomic guarantee:
-    - If any operation creation fails, rollback everything.
+    - If ANY step fails → rollback everything
     """
- 
-    created_operations = []
- 
+
+    created_operation_ids = []
+
     try:
-        # 1️⃣ Validate route first
         route = validate_part_route(part_id, tenant_id)
- 
-        # 2️⃣ Create job operations in order
+
         for index, op_id in enumerate(route):
             job_operation_id = f"{job_id}-{op_id}"
- 
+
             job_operation = {
                 "job_operation_id": job_operation_id,
                 "job_id": job_id,
                 "operation_id": op_id,
                 "sequence_number": index + 1,
-                "status": "READY" if index == 0 else "NOT_STARTED"
+                "status": "READY" if index == 0 else "NOT_STARTED",
             }
- 
-            # Simulate persistence
+
             JOB_OPERATIONS_TABLE[job_operation_id] = job_operation
-            created_operations.append(job_operation_id)
- 
-        return created_operations
- 
-    except Exception as e:
-        # 3️⃣ ROLLBACK (CRITICAL)
-        for job_op_id in created_operations:
-            JOB_OPERATIONS_TABLE.pop(job_op_id, None)
- 
-        raise e
+            created_operation_ids.append(job_operation_id)
+
+        # ✅ AUDIT LOG (Jira requirement)
+        logger.info(
+            "JOB_ROUTE_CREATED",
+            extra={"job_id": job_id, "tenant_id": tenant_id},
+        )
+
+        return created_operation_ids
+
+    except Exception as exc:
+        # 🔴 ROLLBACK (CRITICAL)
+        for op_id in created_operation_ids:
+            JOB_OPERATIONS_TABLE.pop(op_id, None)
+
+        raise exc
 
 
+# -------------------------------------------------------
+# STEP 3: Read Operations for a Job
+# -------------------------------------------------------
+
+def get_job_operations(job_id: str) -> List[Dict]:
+    """
+    Returns job operations ordered by sequence_number.
+    Used by GET /jobs/{job_id}
+    """
+
+    operations = [
+        op for op in JOB_OPERATIONS_TABLE.values()
+        if op["job_id"] == job_id
+    ]
+
+    return sorted(operations, key=lambda x: x["sequence_number"])
