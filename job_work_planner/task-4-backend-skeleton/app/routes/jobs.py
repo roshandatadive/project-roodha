@@ -19,24 +19,30 @@ from datetime import datetime
 import uuid
 import logging
 
-# 🔗 Import Scrum 25 service
+# ---------------------------------------------------------------
+# Import Scrum 25 service (business logic, NOT API)
+# ---------------------------------------------------------------
 from app.core.job_operations_service import create_job_operations
 
-# -------------------------------------------------------------------
+# ---------------------------------------------------------------
 # Router
-# -------------------------------------------------------------------
-router = APIRouter(prefix="/jobs", tags=["Jobs"])
+# ---------------------------------------------------------------
+router = APIRouter(
+    prefix="/jobs",
+    tags=["Jobs"]
+)
 
-# -------------------------------------------------------------------
-# Logger (shared app logger)
-# -------------------------------------------------------------------
+# ---------------------------------------------------------------
+# Logger (shared application logger)
+# ---------------------------------------------------------------
 logger = logging.getLogger("jobwork-backend")
 
-# -------------------------------------------------------------------
-# MOCK DATABASES (temporary – DB later)
-# -------------------------------------------------------------------
-JOBS_TABLE = {}  # job_id → job header
+# ---------------------------------------------------------------
+# MOCK DATABASES (TEMPORARY – replaced by DB later)
+# ---------------------------------------------------------------
+JOBS_TABLE = {}  # job_id -> job header
 
+# Mock master data (simulating DB validation)
 MOCK_CUSTOMERS = {
     "cust-1": {"tenant_id": "tenant-1"}
 }
@@ -45,12 +51,15 @@ MOCK_PARTS = {
     "part-1": {"tenant_id": "tenant-1"}
 }
 
+# ---------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------
 ALLOWED_PRIORITY = {"LOW", "MEDIUM", "HIGH"}
 ALLOWED_CREATOR_ROLES = {"OWNER", "SUPERVISOR"}
 
-# -------------------------------------------------------------------
+# ---------------------------------------------------------------
 # POST /jobs
-# -------------------------------------------------------------------
+# ---------------------------------------------------------------
 @router.post("/", status_code=status.HTTP_201_CREATED)
 def create_job(payload: dict, request: Request):
     """
@@ -64,26 +73,32 @@ def create_job(payload: dict, request: Request):
     5. Return job + operations
     """
 
-    # ---------------------------------------------------------------
-    # 1. Authentication
-    # ---------------------------------------------------------------
+    # -----------------------------------------------------------
+    # 1. Authentication & Context
+    # -----------------------------------------------------------
     if not hasattr(request.state, "user"):
-        raise HTTPException(status_code=401, detail="Unauthorized")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Unauthorized"
+        )
 
     user = request.state.user
     tenant_id = user["tenant_id"]
     created_by = user["user_id"]
-    role = user.get("role", "OWNER")
+    role = user.get("role", "OWNER")  # mock default role
 
-    # ---------------------------------------------------------------
-    # 2. RBAC
-    # ---------------------------------------------------------------
+    # -----------------------------------------------------------
+    # 2. RBAC (Role-Based Access Control)
+    # -----------------------------------------------------------
     if role not in ALLOWED_CREATOR_ROLES:
-        raise HTTPException(status_code=403, detail="Forbidden")
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Forbidden"
+        )
 
-    # ---------------------------------------------------------------
-    # 3. Read payload
-    # ---------------------------------------------------------------
+    # -----------------------------------------------------------
+    # 3. Read request payload
+    # -----------------------------------------------------------
     customer_id = payload.get("customer_id")
     part_id = payload.get("part_id")
     quantity = payload.get("quantity")
@@ -91,30 +106,66 @@ def create_job(payload: dict, request: Request):
     due_date = payload.get("due_date")
     priority = payload.get("priority")
 
-    # ---------------------------------------------------------------
+    # -----------------------------------------------------------
     # 4. Validations (Scrum 24)
-    # ---------------------------------------------------------------
-    if not all([customer_id, part_id, quantity, received_date, due_date, priority]):
-        raise HTTPException(status_code=400, detail="Missing required fields")
+    # -----------------------------------------------------------
+    # Explicit None checks (IMPORTANT: quantity=0 must not be treated as missing)
+    if (
+        customer_id is None
+        or part_id is None
+        or quantity is None
+        or received_date is None
+        or due_date is None
+        or priority is None
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Missing required fields"
+        )
 
     if quantity <= 0:
-        raise HTTPException(status_code=400, detail="Quantity must be > 0")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Quantity must be > 0"
+        )
 
     if priority not in ALLOWED_PRIORITY:
-        raise HTTPException(status_code=400, detail="Invalid priority")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid priority"
+        )
 
+    # ISO date string comparison works correctly here
     if due_date < received_date:
-        raise HTTPException(status_code=400, detail="Invalid date range")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid date range"
+        )
 
-    if customer_id not in MOCK_CUSTOMERS or MOCK_CUSTOMERS[customer_id]["tenant_id"] != tenant_id:
-        raise HTTPException(status_code=400, detail="Invalid customer")
+    # -----------------------------------------------------------
+    # 5. Tenant isolation checks (mocked)
+    # -----------------------------------------------------------
+    if (
+        customer_id not in MOCK_CUSTOMERS
+        or MOCK_CUSTOMERS[customer_id]["tenant_id"] != tenant_id
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid customer"
+        )
 
-    if part_id not in MOCK_PARTS or MOCK_PARTS[part_id]["tenant_id"] != tenant_id:
-        raise HTTPException(status_code=400, detail="Invalid part")
+    if (
+        part_id not in MOCK_PARTS
+        or MOCK_PARTS[part_id]["tenant_id"] != tenant_id
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid part"
+        )
 
-    # ---------------------------------------------------------------
-    # 5. Generate Job Header
-    # ---------------------------------------------------------------
+    # -----------------------------------------------------------
+    # 6. Generate Job Header (Scrum 24)
+    # -----------------------------------------------------------
     job_id = str(uuid.uuid4())
 
     tenant_job_count = sum(
@@ -145,9 +196,9 @@ def create_job(payload: dict, request: Request):
     # Persist job header
     JOBS_TABLE[job_id] = job
 
-    # ---------------------------------------------------------------
-    # 6. SCRUM 25 INTEGRATION (CRITICAL PART)
-    # ---------------------------------------------------------------
+    # -----------------------------------------------------------
+    # 7. SCRUM 25 – Auto-generate Job Operations (ATOMIC)
+    # -----------------------------------------------------------
     try:
         job_operations = create_job_operations(
             job_id=job_id,
@@ -155,26 +206,38 @@ def create_job(payload: dict, request: Request):
             tenant_id=tenant_id
         )
     except Exception as e:
-        # 🔥 Atomic rollback (required by Jira)
+        # 🔥 Rollback job header if route creation fails
         JOBS_TABLE.pop(job_id, None)
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e)
+        )
 
-    # ---------------------------------------------------------------
-    # 7. Audit logs
-    # ---------------------------------------------------------------
+    # -----------------------------------------------------------
+    # 8. Audit Logging (Scrum 24 + 25)
+    # -----------------------------------------------------------
     logger.info(
         "JOB_CREATED",
-        extra={"job_id": job_id, "tenant_id": tenant_id}
+        extra={
+            "event": "JOB_CREATED",
+            "job_id": job_id,
+            "tenant_id": tenant_id,
+            "created_by": created_by
+        }
     )
 
     logger.info(
         "JOB_ROUTE_CREATED",
-        extra={"job_id": job_id, "tenant_id": tenant_id}
+        extra={
+            "event": "JOB_ROUTE_CREATED",
+            "job_id": job_id,
+            "tenant_id": tenant_id
+        }
     )
 
-    # ---------------------------------------------------------------
-    # 8. Response (Scrum 24 + 25)
-    # ---------------------------------------------------------------
+    # -----------------------------------------------------------
+    # 9. Response
+    # -----------------------------------------------------------
     return {
         "job": job,
         "operations": job_operations
