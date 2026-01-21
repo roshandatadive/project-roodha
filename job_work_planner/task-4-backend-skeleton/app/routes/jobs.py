@@ -353,3 +353,83 @@ def list_jobs(
         "page_size": page_size,
         "total_count": total_count
     }
+
+
+
+# -------------------------------------------------------------------
+# GET /jobs/{job_id}  (Scrum 27)
+# -------------------------------------------------------------------
+@router.get("/{job_id}")
+def get_job_detail(job_id: str, request: Request):
+    """
+    GET /jobs/{job_id}
+
+    PURPOSE:
+    - Fetch single job header
+    - Fetch ordered job operations
+    - Compute current_stage
+    - Compute delayed flag
+    """
+
+    # ---------------------------------------------------------------
+    # 1. Authentication
+    # ---------------------------------------------------------------
+    if not hasattr(request.state, "user"):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    tenant_id = request.state.user["tenant_id"]
+
+    # ---------------------------------------------------------------
+    # 2. Fetch job header
+    # ---------------------------------------------------------------
+    job = JOBS_TABLE.get(job_id)
+
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    # Tenant isolation (preferred: 404)
+    if job["tenant_id"] != tenant_id:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    # ---------------------------------------------------------------
+    # 3. Fetch job operations (Scrum 25 data)
+    # ---------------------------------------------------------------
+    from app.core.job_operations_service import JOB_OPERATIONS_TABLE
+
+    operations = [
+        op for op in JOB_OPERATIONS_TABLE.values()
+        if op["job_id"] == job_id
+    ]
+
+    # Sort by sequence_number
+    operations.sort(key=lambda op: op["sequence_number"])
+
+    # ---------------------------------------------------------------
+    # 4. Compute current_stage
+    # ---------------------------------------------------------------
+    current_stage = "COMPLETED"
+
+    for op in operations:
+        if op["status"] != "COMPLETED":
+            current_stage = op["operation_id"]
+            break
+
+    # ---------------------------------------------------------------
+    # 5. Compute delayed flag
+    # ---------------------------------------------------------------
+    today = datetime.utcnow().date()
+    due_date = datetime.fromisoformat(job["due_date"]).date()
+
+    delayed = today > due_date and job["status"] != "COMPLETED"
+
+    # ---------------------------------------------------------------
+    # 6. Response
+    # ---------------------------------------------------------------
+    return {
+        "job": {
+            **job,
+            "current_stage": current_stage,
+            "delayed": delayed
+        },
+        "operations": operations
+    }
