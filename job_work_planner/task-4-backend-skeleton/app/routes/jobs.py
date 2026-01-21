@@ -242,3 +242,114 @@ def create_job(payload: dict, request: Request):
         "job": job,
         "operations": job_operations
     }
+
+# -------------------------------------------------------------------
+# GET /jobs  (Scrum 26)
+# -------------------------------------------------------------------
+@router.get("/")
+def list_jobs(
+    request: Request,
+    status: str | None = None,
+    customer_id: str | None = None,
+    priority: str | None = None,
+    from_date: str | None = None,
+    to_date: str | None = None,
+    page: int = 1,
+    page_size: int = 25,
+):
+    """
+    GET /jobs
+
+    PURPOSE:
+    - List jobs for current tenant
+    - Supports filters + pagination
+
+    FILTERS:
+    - status
+    - customer_id
+    - priority
+    - from_date / to_date (received_date based)
+
+    PAGINATION:
+    - page (default = 1)
+    - page_size (default = 25, max = 100)
+
+    NOTE:
+    - In-memory filtering (MVP)
+    - In production, DynamoDB GSI will be used
+    """
+
+    # ---------------------------------------------------------------
+    # 1. Authentication
+    # ---------------------------------------------------------------
+    if not hasattr(request.state, "user"):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    tenant_id = request.state.user["tenant_id"]
+
+    # ---------------------------------------------------------------
+    # 2. Pagination validation
+    # ---------------------------------------------------------------
+    if page < 1:
+        raise HTTPException(status_code=400, detail="page must be >= 1")
+
+    if page_size < 1 or page_size > 100:
+        raise HTTPException(status_code=400, detail="page_size must be between 1 and 100")
+
+    # ---------------------------------------------------------------
+    # 3. Tenant isolation
+    # ---------------------------------------------------------------
+    jobs = [
+        job for job in JOBS_TABLE.values()
+        if job["tenant_id"] == tenant_id
+    ]
+
+    # ---------------------------------------------------------------
+    # 4. Apply filters
+    # ---------------------------------------------------------------
+    if status:
+        jobs = [job for job in jobs if job["status"] == status]
+
+    if customer_id:
+        jobs = [job for job in jobs if job["customer_id"] == customer_id]
+
+    if priority:
+        jobs = [job for job in jobs if job["priority"] == priority]
+
+    if from_date:
+        jobs = [job for job in jobs if job["received_date"] >= from_date]
+
+    if to_date:
+        jobs = [job for job in jobs if job["received_date"] <= to_date]
+
+    # ---------------------------------------------------------------
+    # 5. Sorting
+    #   - due_date ASC
+    #   - priority DESC
+    # ---------------------------------------------------------------
+    priority_rank = {"HIGH": 3, "MEDIUM": 2, "LOW": 1}
+
+    jobs.sort(
+        key=lambda job: (
+            job["due_date"],
+            -priority_rank.get(job["priority"], 0)
+        )
+    )
+
+    # ---------------------------------------------------------------
+    # 6. Pagination slice
+    # ---------------------------------------------------------------
+    total_count = len(jobs)
+    start = (page - 1) * page_size
+    end = start + page_size
+    paginated_jobs = jobs[start:end]
+
+    # ---------------------------------------------------------------
+    # 7. Response
+    # ---------------------------------------------------------------
+    return {
+        "items": paginated_jobs,
+        "page": page,
+        "page_size": page_size,
+        "total_count": total_count
+    }
