@@ -106,12 +106,13 @@ def create_job_operations(job_id: str, part_id: str, tenant_id: str) -> List[Dic
             job_operation_id = f"{job_id}-{op_id}"
 
             job_operation = {
-                "job_operation_id": job_operation_id,
-                "job_id": job_id,
-                "operation_id": op_id,
-                "sequence_number": index + 1,
-                "status": "READY" if index == 0 else "NOT_STARTED",
-            }
+              "job_operation_id": job_operation_id,
+              "job_id": job_id,
+              "tenant_id": tenant_id,          # ✅ 
+              "operation_id": op_id,
+              "sequence_number": index + 1,
+              "status": "READY" if index == 0 else "NOT_STARTED",
+}
 
             JOB_OPERATIONS_TABLE[job_operation_id] = job_operation
             created_operation_ids.append(job_operation_id)

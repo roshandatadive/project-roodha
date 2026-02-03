@@ -355,6 +355,77 @@ def list_jobs(
     }
 
 
+# =======================================================
+# SCRUM 30 – Jobs by Stage (Kanban View)
+# GET /jobs/by-stage?date=YYYY-MM-DD
+# =======================================================
+
+from fastapi import Query
+
+from app.core.jobs_by_stage_service import get_jobs_by_stage_service
+
+
+@router.get("/by-stage")
+def get_jobs_by_stage(
+    request: Request,
+    date: str | None = Query(
+        default=None,
+        description="Optional date filter (YYYY-MM-DD)"
+    ),
+):
+    """
+    SCRUM 30 – Jobs by Stage API
+
+    Purpose:
+    - Kanban-style backend response for supervisor UI
+    - Groups jobs by current_stage
+
+    Query Params:
+    - date (optional): YYYY-MM-DD
+    """
+
+    # ---------------------------------------------------
+    # 1. Authentication
+    # ---------------------------------------------------
+    if not hasattr(request.state, "user"):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Unauthorized"
+        )
+
+    tenant_id = request.state.user["tenant_id"]
+
+    # ---------------------------------------------------
+    # 2. Call service layer
+    # ---------------------------------------------------
+    try:
+        response = get_jobs_by_stage_service(
+            tenant_id=tenant_id,
+            date=date
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc)
+        )
+
+    # ---------------------------------------------------
+    # 3. Response
+    # ---------------------------------------------------
+    return response
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 # -------------------------------------------------------------------
 # GET /jobs/{job_id}  (Scrum 27)
@@ -433,3 +504,6 @@ def get_job_detail(job_id: str, request: Request):
         },
         "operations": operations
     }
+
+
+
