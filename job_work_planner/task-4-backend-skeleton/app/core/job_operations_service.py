@@ -25,6 +25,16 @@ logger = logging.getLogger("jobwork-backend")
 # (Replace with DynamoDB later)
 # -----------------------------
 
+MACHINES_TABLE = {
+    "machine-1": {"machine_id": "machine-1", "tenant_id": "tenant-1"},
+    "machine-2": {"machine_id": "machine-2", "tenant_id": "tenant-1"},
+}
+
+SHIFTS_TABLE = {
+    "shift-A": {"shift_id": "shift-A", "tenant_id": "tenant-1"},
+    "shift-B": {"shift_id": "shift-B", "tenant_id": "tenant-1"},
+}
+
 PARTS_TABLE = {
     "part-1": {
         "part_id": "part-1",
@@ -387,13 +397,124 @@ def update_job_operation_status(
     # Return updated operation
     return job_op
 
+# -------------------------------------------------------
+# SCRUM 29: Plan Job Operation (Service Layer)
+# -------------------------------------------------------
 
+def plan_job_operation_service(
+    job_operation_id: str,
+    machine_id: str,
+    shift_id: str,
+    planned_start_date: str,
+    planned_end_date: str,
+):
+    """
+    SCRUM 29 – Plan Job Operation
+    """
 
+    conflict_warning = None
 
+    # ---------------------------------------------------
+    # STEP 1: Fetch job operation
+    # ---------------------------------------------------
+    job_op = JOB_OPERATIONS_TABLE.get(job_operation_id)
+    if not job_op:
+        raise ValueError("Job operation not found")
 
+    tenant_id = job_op.get("tenant_id")
 
+    # ---------------------------------------------------
+    # STEP 2: Validate machine & shift (tenant isolation)
+    # ---------------------------------------------------
+    machine = MACHINES_TABLE.get(machine_id)
+    if not machine:
+        raise ValueError("Machine not found")
 
+    shift = SHIFTS_TABLE.get(shift_id)
+    if not shift:
+        raise ValueError("Shift not found")
 
+    if machine["tenant_id"] != tenant_id:
+        raise ValueError("Machine does not belong to tenant")
+
+    if shift["tenant_id"] != tenant_id:
+        raise ValueError("Shift does not belong to tenant")
+
+    # ---------------------------------------------------
+    # STEP 3: Validate planning dates
+    # ---------------------------------------------------
+    try:
+        start_date = datetime.fromisoformat(planned_start_date)
+        end_date = datetime.fromisoformat(planned_end_date)
+    except ValueError:
+        raise ValueError("Invalid date format. Use ISO format YYYY-MM-DD")
+
+    if start_date > end_date:
+        raise ValueError("planned_start_date cannot be after planned_end_date")
+
+    # ---------------------------------------------------
+    # STEP 4: Detect machine planning conflicts (SOFT)
+    # ---------------------------------------------------
+    for op in JOB_OPERATIONS_TABLE.values():
+        if op["job_operation_id"] == job_operation_id:
+            continue
+
+        if op.get("machine_id") != machine_id:
+            continue
+
+        existing_start = op.get("planned_start_date")
+        existing_end = op.get("planned_end_date")
+
+        if not existing_start or not existing_end:
+            continue
+
+        existing_start_dt = datetime.fromisoformat(existing_start)
+        existing_end_dt = datetime.fromisoformat(existing_end)
+
+        if start_date <= existing_end_dt and end_date >= existing_start_dt:
+            conflict_warning = (
+                "Machine has overlapping planned operation in this time window"
+            )
+            break
+
+    # ---------------------------------------------------
+    # STEP 5: Update planning fields
+    # ---------------------------------------------------
+    now = datetime.utcnow().isoformat()
+
+    job_op.update({
+        "machine_id": machine_id,
+        "shift_id": shift_id,
+        "planned_start_date": planned_start_date,
+        "planned_end_date": planned_end_date,
+        "updated_at": now,
+    })
+
+    # ---------------------------------------------------
+    # STEP 6: Audit log
+    # ---------------------------------------------------
+    logger.info(
+        "OP_PLANNED",
+        extra={
+            "event": "OP_PLANNED",
+            "job_operation_id": job_operation_id,
+            "machine_id": machine_id,
+            "shift_id": shift_id,
+            "planned_start_date": planned_start_date,
+            "planned_end_date": planned_end_date,
+        },
+    )
+
+    # ---------------------------------------------------
+    # STEP 7: Response
+    # ---------------------------------------------------
+    if conflict_warning:
+        return {
+            "job_operation": job_op,
+            "warning": conflict_warning,
+        }
+
+    return job_op
 
 
 
