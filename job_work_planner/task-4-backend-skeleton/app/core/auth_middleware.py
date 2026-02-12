@@ -26,10 +26,20 @@ class JWTAuthMiddleware(BaseHTTPMiddleware):
         - Always return a Response
         """
 
+        
+        
         # -------------------------------------------------
         # 1. Public endpoints (no auth)
         # -------------------------------------------------
-        if request.url.path == "/health":
+        # Allow documentation and health checks to bypass auth
+        public_paths = {
+            "/health", 
+            "/docs", 
+            "/openapi.json", 
+            "/redoc"
+        }
+        
+        if request.url.path in public_paths:
             return await call_next(request)
 
         # -------------------------------------------------

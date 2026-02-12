@@ -1,19 +1,22 @@
+# app/core/job_operations_service.py
+
 """
 job_operations_service.py
 -------------------------
 
 SCRUM 25 – Auto Generate Job Operations
+SCRUM 28 - State Machine & Status Updates
+SCRUM 29 - Planning (Machine/Shift)
+SCRUM 31 - Execution Controls (Start/Pause/Resume)
 
 Responsibilities:
-- Read Part default operation route
-- Validate route + tenant isolation
-- Create job_operations atomically
-- Rollback on failure
-- Write audit log entry: JOB_ROUTE_CREATED
-
-IMPORTANT:
-- This is a SERVICE, not an API
+- Validate part routes
+- Create operations atomically
+- Enforce state machine rules
+- Capture execution timestamps & user audit
+- Update parent job status automatically
 """
+
 from datetime import datetime
 from typing import List, Dict
 import logging
@@ -59,14 +62,7 @@ JOB_OPERATIONS_TABLE: Dict[str, Dict] = {}
 def validate_part_route(part_id: str, tenant_id: str) -> List[str]:
     """
     Validates Part default operation route.
-
-    Guarantees:
-    - Part exists
-    - Part belongs to tenant
-    - Route is not empty
-    - All operation IDs exist
     """
-
     part = PARTS_TABLE.get(part_id)
     if not part:
         raise ValueError("Part does not exist")
@@ -92,11 +88,7 @@ def validate_part_route(part_id: str, tenant_id: str) -> List[str]:
 def create_job_operations(job_id: str, part_id: str, tenant_id: str) -> List[Dict]:
     """
     Creates job operations from part route.
-
-    Atomic guarantee:
-    - If ANY step fails → rollback everything
     """
-
     created_operation_ids = []
 
     try:
@@ -108,16 +100,15 @@ def create_job_operations(job_id: str, part_id: str, tenant_id: str) -> List[Dic
             job_operation = {
               "job_operation_id": job_operation_id,
               "job_id": job_id,
-              "tenant_id": tenant_id,          # ✅ 
+              "tenant_id": tenant_id,
               "operation_id": op_id,
               "sequence_number": index + 1,
               "status": "READY" if index == 0 else "NOT_STARTED",
-}
+            }
 
             JOB_OPERATIONS_TABLE[job_operation_id] = job_operation
             created_operation_ids.append(job_operation_id)
 
-        # ✅ AUDIT LOG (Jira requirement)
         logger.info(
             "JOB_ROUTE_CREATED",
             extra={"job_id": job_id, "tenant_id": tenant_id},
@@ -126,10 +117,9 @@ def create_job_operations(job_id: str, part_id: str, tenant_id: str) -> List[Dic
         return created_operation_ids
 
     except Exception as exc:
-        # 🔴 ROLLBACK (CRITICAL)
+        # ROLLBACK
         for op_id in created_operation_ids:
             JOB_OPERATIONS_TABLE.pop(op_id, None)
-
         raise exc
 
 
@@ -140,44 +130,38 @@ def create_job_operations(job_id: str, part_id: str, tenant_id: str) -> List[Dic
 def get_job_operations(job_id: str) -> List[Dict]:
     """
     Returns job operations ordered by sequence_number.
-    Used by GET /jobs/{job_id}
     """
-
     operations = [
         op for op in JOB_OPERATIONS_TABLE.values()
         if op["job_id"] == job_id
     ]
-
     return sorted(operations, key=lambda x: x["sequence_number"])
 
 
 # -------------------------------------------------------
-# SCRUM 28: Operation Status Constants
+# SCRUM 28/31: Operation Status Constants
 # -------------------------------------------------------
 
 OP_STATUS_NOT_STARTED = "NOT_STARTED"
 OP_STATUS_READY = "READY"
 OP_STATUS_IN_PROGRESS = "IN_PROGRESS"
-OP_STATUS_ON_HOLD = "ON_HOLD"
+OP_STATUS_PAUSED = "PAUSED"       # <--- SCRUM 31: Added PAUSED
 OP_STATUS_COMPLETED = "COMPLETED"
 OP_STATUS_CANCELLED = "CANCELLED"
 
 
 # -------------------------------------------------------
-# SCRUM 28: Allowed Status Transitions (State Machine)
+# SCRUM 28/31: Allowed Status Transitions (State Machine)
 # -------------------------------------------------------
 
 ALLOWED_STATUS_TRANSITIONS = {
     OP_STATUS_NOT_STARTED: {OP_STATUS_IN_PROGRESS, OP_STATUS_CANCELLED},
     OP_STATUS_READY: {OP_STATUS_IN_PROGRESS},
-    OP_STATUS_IN_PROGRESS: {OP_STATUS_COMPLETED, OP_STATUS_ON_HOLD},
-    OP_STATUS_ON_HOLD: {OP_STATUS_IN_PROGRESS},
+    OP_STATUS_IN_PROGRESS: {OP_STATUS_COMPLETED, OP_STATUS_PAUSED}, # <--- Can Pause or Complete
+    OP_STATUS_PAUSED: {OP_STATUS_IN_PROGRESS},                       # <--- Can Resume
     OP_STATUS_COMPLETED: set(),
     OP_STATUS_CANCELLED: set(),
 }
-
-
-
 
 def is_valid_status_transition(current_status: str, new_status: str) -> bool:
     """
@@ -188,17 +172,15 @@ def is_valid_status_transition(current_status: str, new_status: str) -> bool:
     return new_status in allowed
 
 
-
-
-
 # -------------------------------------------------------
-# SCRUM 28: Update Job Operation Status (Service Logic)
+# SCRUM 28/31: Update Job Operation Status (Service Logic)
 # -------------------------------------------------------
 
 def update_job_operation_status(
     job_operation_id: str,
     new_status: str,
     *,
+    user_id: str,  # <--- SCRUM 31: Required for audit
     quantity_completed: int | None = None,
     quantity_rejected: int | None = None,
     rework_flag: bool = False,
@@ -209,11 +191,10 @@ def update_job_operation_status(
     Updates the status of a job operation while enforcing:
     - State machine rules
     - Sequence constraints
+    - Planning Prerequisites (Machine Assigned?)
     - Quantity validations
-    - Timestamp tracking
+    - Timestamp tracking (Start/Pause/Resume/End)
     - Parent job status updates
-
-    This is SERVICE logic (called by API later).
     """
 
     # ---------------------------------------------------
@@ -233,12 +214,17 @@ def update_job_operation_status(
             f"Invalid status transition: {current_status} → {new_status}"
         )
 
-   
+    # ---------------------------------------------------
+    # 3. SCRUM 31: Planning Prerequisite Check
+    # "Operation can’t start unless machine+shift+date are assigned"
+    # We check this only when starting fresh (not when resuming)
+    # ---------------------------------------------------
+    if new_status == OP_STATUS_IN_PROGRESS and current_status != OP_STATUS_PAUSED:
+        if not job_op.get("machine_id"):
+            raise ValueError("Cannot start operation: Machine not assigned (Planning required)")
 
-
-
-# ---------------------------------------------------
-    # 3. Sequence enforcement (SCRUM 28)
+    # ---------------------------------------------------
+    # 4. SCRUM 28: Sequence enforcement
     # ---------------------------------------------------
     if new_status == OP_STATUS_IN_PROGRESS and not override_sequence:
         job_id = job_op["job_id"]
@@ -262,22 +248,12 @@ def update_job_operation_status(
                     "Previous operation must be COMPLETED before starting this one"
                 )
 
-
-
-
-
-
-
-
-# ---------------------------------------------------
-    # STEP 4: Quantity & Completion Validations
+    # ---------------------------------------------------
+    # 5. SCRUM 28: Quantity & Completion Validations
     # ---------------------------------------------------
     if new_status == OP_STATUS_COMPLETED:
-
         if quantity_completed is None:
-            raise ValueError(
-                "quantity_completed is required when completing an operation"
-            )
+            raise ValueError("quantity_completed is required when completing")
 
         if quantity_completed < 0:
             raise ValueError("quantity_completed cannot be negative")
@@ -288,43 +264,36 @@ def update_job_operation_status(
         if quantity_rejected < 0:
             raise ValueError("quantity_rejected cannot be negative")
 
-        # 🔒 Job quantity enforcement
-        # (Job qty will come from JOBS_TABLE later via API layer)
-        job_qty = job_op.get("job_quantity")  # placeholder for now
-
-        if job_qty is not None:
-            if quantity_completed > job_qty:
-                raise ValueError("quantity_completed exceeds job quantity")
-
-            if (quantity_completed + quantity_rejected) > job_qty:
-                raise ValueError(
-                    "completed + rejected quantity exceeds job quantity"
-                )
-
-        # 🔁 Rework validation
+        # Rework validation
         if rework_flag and not rework_note:
             raise ValueError("rework_note is required when rework_flag is true")
 
-
-
-
-
-
-
-# ---------------------------------------------------
-    # STEP 5: Timestamp handling & status mutation
+    # ---------------------------------------------------
+    # 6. SCRUM 31: Timestamp & Audit Handling
     # ---------------------------------------------------
 
     now = datetime.utcnow().isoformat()
 
-    # When operation starts
-    if new_status == OP_STATUS_IN_PROGRESS:
+    # Case A: STARTING (Fresh)
+    if new_status == OP_STATUS_IN_PROGRESS and current_status != OP_STATUS_PAUSED:
         if not job_op.get("actual_start_time"):
             job_op["actual_start_time"] = now
+        job_op["started_by"] = user_id
 
-    # When operation completes
+    # Case B: PAUSING
+    if new_status == OP_STATUS_PAUSED:
+        job_op["paused_at"] = now
+        job_op["paused_by"] = user_id
+
+    # Case C: RESUMING
+    if new_status == OP_STATUS_IN_PROGRESS and current_status == OP_STATUS_PAUSED:
+        job_op["resumed_at"] = now
+        job_op["resumed_by"] = user_id
+
+    # Case D: COMPLETING
     if new_status == OP_STATUS_COMPLETED:
         job_op["actual_end_time"] = now
+        job_op["completed_by"] = user_id
 
         # Persist quantities
         job_op["quantity_completed"] = quantity_completed
@@ -337,66 +306,46 @@ def update_job_operation_status(
     # Update status (single source of truth)
     job_op["status"] = new_status
 
-
-
-
-
-# ---------------------------------------------------
-    # STEP 6: Update parent job status
     # ---------------------------------------------------
-
-    from app.routes.jobs import JOBS_TABLE  # mock import (temporary)
-
-    job_id = job_op["job_id"]
-    job = JOBS_TABLE.get(job_id)
-
-    if not job:
-        raise ValueError("Parent job not found")
-
-    # Fetch all operations for this job
-    all_ops = [
-        op for op in JOB_OPERATIONS_TABLE.values()
-        if op["job_id"] == job_id
-    ]
-
-    # If any operation is IN_PROGRESS → job IN_PROGRESS
-    if any(op["status"] == OP_STATUS_IN_PROGRESS for op in all_ops):
-        job["status"] = "IN_PROGRESS"
-
-    # If ALL operations are COMPLETED → job COMPLETED
-    elif all(op["status"] == OP_STATUS_COMPLETED for op in all_ops):
-        job["status"] = "COMPLETED"
-
-    # Otherwise → NOT_STARTED
-    else:
-        job["status"] = "NOT_STARTED"
-
-    job["updated_at"] = now
-
-
-
-
-
-# ---------------------------------------------------
-    # STEP 7: Audit logging + response
+    # 7. Update parent job status
     # ---------------------------------------------------
+    from app.routes.jobs import JOBS_TABLE  # temporary import
+    job = JOBS_TABLE.get(job_op["job_id"])
 
+    if job:
+        # Fetch all operations for this job
+        all_ops = [
+            op for op in JOB_OPERATIONS_TABLE.values()
+            if op["job_id"] == job["job_id"]
+        ]
+
+        # If any operation is IN_PROGRESS → job IN_PROGRESS
+        if any(op["status"] == OP_STATUS_IN_PROGRESS for op in all_ops):
+            job["status"] = "IN_PROGRESS"
+
+        # If ALL operations are COMPLETED → job COMPLETED
+        elif all(op["status"] == OP_STATUS_COMPLETED for op in all_ops):
+            job["status"] = "COMPLETED"
+
+        # Otherwise job might be NOT_STARTED or partially active
+        job["updated_at"] = now
+
+    # ---------------------------------------------------
+    # 8. Audit logging + response
+    # ---------------------------------------------------
     logger.info(
         "OP_STATUS_CHANGED",
         extra={
             "event": "OP_STATUS_CHANGED",
             "job_operation_id": job_operation_id,
-            "job_id": job_op["job_id"],
             "old_status": current_status,
             "new_status": new_status,
-            "quantity_completed": job_op.get("quantity_completed"),
-            "quantity_rejected": job_op.get("quantity_rejected"),
-            "rework_flag": job_op.get("rework_flag", False),
+            "user_id": user_id,  # <--- Audit who made the change
         },
     )
 
-    # Return updated operation
     return job_op
+
 
 # -------------------------------------------------------
 # SCRUM 29: Plan Job Operation (Service Layer)
@@ -412,38 +361,29 @@ def plan_job_operation_service(
     """
     SCRUM 29 – Plan Job Operation
     """
-
     conflict_warning = None
 
-    # ---------------------------------------------------
-    # STEP 1: Fetch job operation
-    # ---------------------------------------------------
+    # 1. Fetch job operation
     job_op = JOB_OPERATIONS_TABLE.get(job_operation_id)
     if not job_op:
         raise ValueError("Job operation not found")
 
     tenant_id = job_op.get("tenant_id")
 
-    # ---------------------------------------------------
-    # STEP 2: Validate machine & shift (tenant isolation)
-    # ---------------------------------------------------
+    # 2. Validate machine & shift (tenant isolation)
     machine = MACHINES_TABLE.get(machine_id)
     if not machine:
         raise ValueError("Machine not found")
-
     shift = SHIFTS_TABLE.get(shift_id)
     if not shift:
         raise ValueError("Shift not found")
 
     if machine["tenant_id"] != tenant_id:
         raise ValueError("Machine does not belong to tenant")
-
     if shift["tenant_id"] != tenant_id:
         raise ValueError("Shift does not belong to tenant")
 
-    # ---------------------------------------------------
-    # STEP 3: Validate planning dates
-    # ---------------------------------------------------
+    # 3. Validate planning dates
     try:
         start_date = datetime.fromisoformat(planned_start_date)
         end_date = datetime.fromisoformat(planned_end_date)
@@ -453,19 +393,15 @@ def plan_job_operation_service(
     if start_date > end_date:
         raise ValueError("planned_start_date cannot be after planned_end_date")
 
-    # ---------------------------------------------------
-    # STEP 4: Detect machine planning conflicts (SOFT)
-    # ---------------------------------------------------
+    # 4. Detect conflicts (SOFT)
     for op in JOB_OPERATIONS_TABLE.values():
         if op["job_operation_id"] == job_operation_id:
             continue
-
         if op.get("machine_id") != machine_id:
             continue
 
         existing_start = op.get("planned_start_date")
         existing_end = op.get("planned_end_date")
-
         if not existing_start or not existing_end:
             continue
 
@@ -473,16 +409,11 @@ def plan_job_operation_service(
         existing_end_dt = datetime.fromisoformat(existing_end)
 
         if start_date <= existing_end_dt and end_date >= existing_start_dt:
-            conflict_warning = (
-                "Machine has overlapping planned operation in this time window"
-            )
+            conflict_warning = "Machine has overlapping planned operation in this time window"
             break
 
-    # ---------------------------------------------------
-    # STEP 5: Update planning fields
-    # ---------------------------------------------------
+    # 5. Update planning fields
     now = datetime.utcnow().isoformat()
-
     job_op.update({
         "machine_id": machine_id,
         "shift_id": shift_id,
@@ -491,9 +422,7 @@ def plan_job_operation_service(
         "updated_at": now,
     })
 
-    # ---------------------------------------------------
-    # STEP 6: Audit log
-    # ---------------------------------------------------
+    # 6. Audit log
     logger.info(
         "OP_PLANNED",
         extra={
@@ -501,25 +430,11 @@ def plan_job_operation_service(
             "job_operation_id": job_operation_id,
             "machine_id": machine_id,
             "shift_id": shift_id,
-            "planned_start_date": planned_start_date,
-            "planned_end_date": planned_end_date,
         },
     )
 
-    # ---------------------------------------------------
-    # STEP 7: Response
-    # ---------------------------------------------------
+    # 7. Response
     if conflict_warning:
-        return {
-            "job_operation": job_op,
-            "warning": conflict_warning,
-        }
+        return {"job_operation": job_op, "warning": conflict_warning}
 
     return job_op
-
-
-
-
-
-
-

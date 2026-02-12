@@ -9,6 +9,9 @@ SCRUM 28:
 SCRUM 29:
 - Plan Job Operation (Assign Machine / Shift / Dates)
 
+SCRUM 31:
+- Execution Controls (Start / Pause / Resume)
+
 RESPONSIBILITIES (API LAYER ONLY):
 - Authentication
 - RBAC
@@ -40,7 +43,7 @@ router = APIRouter(
 )
 
 # =======================================================
-# SCRUM 28
+# SCRUM 28 + SCRUM 31
 # PATCH /job-operations/{job_operation_id}/status
 # =======================================================
 @router.patch("/{job_operation_id}/status")
@@ -50,12 +53,12 @@ def update_operation_status(
     request: Request,
 ):
     """
-    Update job operation status (SCRUM 28)
+    Update job operation status (SCRUM 28 + SCRUM 31 Execution Controls)
 
     Payload example:
     {
-        "status": "IN_PROGRESS",
-        "quantity_completed": 5,
+        "status": "IN_PROGRESS",  # or PAUSED, COMPLETED
+        "quantity_completed": 5,  # Only if COMPLETED
         "quantity_rejected": 0,
         "rework_flag": false,
         "rework_note": null,
@@ -106,6 +109,7 @@ def update_operation_status(
     try:
         updated_operation = update_job_operation_status(
             job_operation_id=job_operation_id,
+            user_id=user["user_id"],   # <--- AUDIT: Pass user_id to service
             new_status=new_status,
             quantity_completed=quantity_completed,
             quantity_rejected=quantity_rejected,
