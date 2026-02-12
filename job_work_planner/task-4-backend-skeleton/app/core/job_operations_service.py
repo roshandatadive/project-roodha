@@ -56,6 +56,13 @@ OPERATIONS_TABLE = {
 JOB_OPERATIONS_TABLE: Dict[str, Dict] = {}
 
 # -------------------------------------------------------
+# SCRUM 32: Production Entries Table
+# -------------------------------------------------------
+
+# job_operation_id -> list of production entries
+JOB_OPERATION_PRODUCTION_TABLE: Dict[str, List[Dict]] = {}
+
+# -------------------------------------------------------
 # STEP 1: Route Validation
 # -------------------------------------------------------
 
@@ -347,6 +354,9 @@ def update_job_operation_status(
     return job_op
 
 
+
+
+
 # -------------------------------------------------------
 # SCRUM 29: Plan Job Operation (Service Layer)
 # -------------------------------------------------------
@@ -437,4 +447,123 @@ def plan_job_operation_service(
     if conflict_warning:
         return {"job_operation": job_op, "warning": conflict_warning}
 
-    return job_op
+    return job_op 
+
+
+
+
+
+# -------------------------------------------------------
+# SCRUM 32 – Add Production Entry (Service Layer)
+# -------------------------------------------------------
+
+def add_production_entry_service(
+    *,
+    job_operation_id: str,
+    produced_qty: int,
+    scrap_qty: int,
+    rework_qty: int,
+    operator_id: str,
+    notes: str | None = None,
+):
+    """
+    Records production quantities for an operation.
+    """
+
+    # ---------------------------------------------------
+    # 1. Fetch operation
+    # ---------------------------------------------------
+    job_op = JOB_OPERATIONS_TABLE.get(job_operation_id)
+    if not job_op:
+        raise ValueError("Job operation not found")
+
+    # ---------------------------------------------------
+    # 2. Prevent editing if COMPLETED
+    # ---------------------------------------------------
+    if job_op["status"] == OP_STATUS_COMPLETED:
+        raise ValueError("Cannot record production. Operation already COMPLETED")
+
+    # ---------------------------------------------------
+    # 3. Validate quantities
+    # ---------------------------------------------------
+    if produced_qty < 0 or scrap_qty < 0 or rework_qty < 0:
+        raise ValueError("Quantities cannot be negative")
+
+    total_entry = produced_qty + scrap_qty + rework_qty
+
+    if total_entry == 0:
+        raise ValueError("At least one quantity must be greater than zero")
+
+    # ---------------------------------------------------
+    # 4. Get existing production entries
+    # ---------------------------------------------------
+    existing_entries = JOB_OPERATION_PRODUCTION_TABLE.get(job_operation_id, [])
+
+    total_produced = sum(e["produced_qty"] for e in existing_entries)
+    total_scrap = sum(e["scrap_qty"] for e in existing_entries)
+    total_rework = sum(e["rework_qty"] for e in existing_entries)
+
+    # ---------------------------------------------------
+    # 5. Job Quantity Validation (STRICT RULE)
+    # ---------------------------------------------------
+    from app.routes.jobs import JOBS_TABLE
+
+    job = JOBS_TABLE.get(job_op["job_id"])
+    if not job:
+        raise ValueError("Parent job not found")
+
+    planned_qty = job["quantity"]
+
+    if total_produced + total_scrap + total_rework + total_entry > planned_qty:
+        raise ValueError("Production exceeds job quantity") 
+
+    # ---------------------------------------------------
+    # 6. Create production record
+    # ---------------------------------------------------
+    now = datetime.utcnow().isoformat()
+
+    production_record = {
+        "timestamp": now,
+        "operator_id": operator_id,
+        "produced_qty": produced_qty,
+        "scrap_qty": scrap_qty,
+        "rework_qty": rework_qty,
+        "notes": notes,
+    }
+
+    # Save entry
+    existing_entries.append(production_record)
+    JOB_OPERATION_PRODUCTION_TABLE[job_operation_id] = existing_entries
+
+    # ---------------------------------------------------
+    # 7. Update computed totals on operation
+    # ---------------------------------------------------
+    job_op["total_produced"] = total_produced + produced_qty
+    job_op["total_scrap"] = total_scrap + scrap_qty
+    job_op["total_rework"] = total_rework + rework_qty
+
+    job_op["updated_at"] = now
+
+    # ---------------------------------------------------
+    # 8. Audit log
+    # ---------------------------------------------------
+    logger.info(
+        "PRODUCTION_RECORDED",
+        extra={
+            "job_operation_id": job_operation_id,
+            "operator_id": operator_id,
+            "produced_qty": produced_qty,
+            "scrap_qty": scrap_qty,
+            "rework_qty": rework_qty,
+        },
+    )
+
+    return {
+        "job_operation_id": job_operation_id,
+        "totals": {
+            "total_produced": job_op["total_produced"],
+            "total_scrap": job_op["total_scrap"],
+            "total_rework": job_op["total_rework"],
+        },
+        "entries_count": len(existing_entries),
+    }

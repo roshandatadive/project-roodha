@@ -26,6 +26,8 @@ IMPORTANT:
 
 from fastapi import APIRouter, HTTPException, Request, status
 
+from app.core.job_operations_service import add_production_entry_service
+
 # -------------------------------------------------------
 # Import service layer functions
 # -------------------------------------------------------
@@ -215,4 +217,49 @@ def plan_job_operation(
     # ---------------------------------------------------
     # 6. Response
     # ---------------------------------------------------
-    return updated_operation
+    return updated_operation 
+
+
+
+# -------------------------------------------------------
+# SCRUM 32 – Record Production Entry
+# POST /job-operations/{job_operation_id}/production
+# -------------------------------------------------------
+
+@router.post("/{job_operation_id}/production")
+def record_production(
+    job_operation_id: str,
+    payload: dict,
+    request: Request,
+):
+    """
+    Records production quantities for an operation.
+    """
+
+    # --------------------------------------------
+    # 1. Authentication
+    # --------------------------------------------
+    if not hasattr(request.state, "user"):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    user = request.state.user
+    operator_id = user.get("user_id")
+
+    produced_qty = payload.get("produced_qty", 0)
+    scrap_qty = payload.get("scrap_qty", 0)
+    rework_qty = payload.get("rework_qty", 0)
+    notes = payload.get("notes")
+
+    try:
+        result = add_production_entry_service(
+            job_operation_id=job_operation_id,
+            produced_qty=produced_qty,
+            scrap_qty=scrap_qty,
+            rework_qty=rework_qty,
+            operator_id=operator_id,
+            notes=notes,
+        )
+        return result
+
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
