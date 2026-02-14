@@ -187,7 +187,7 @@ def update_job_operation_status(
     job_operation_id: str,
     new_status: str,
     *,
-    user_id: str,  # <--- SCRUM 31: Required for audit
+    user_id: str,
     quantity_completed: int | None = None,
     quantity_rejected: int | None = None,
     rework_flag: bool = False,
@@ -195,17 +195,17 @@ def update_job_operation_status(
     override_sequence: bool = False,
 ):
     """
-    Updates the status of a job operation while enforcing:
-    - State machine rules
-    - Sequence constraints
-    - Planning Prerequisites (Machine Assigned?)
-    - Quantity validations
-    - Timestamp tracking (Start/Pause/Resume/End)
-    - Parent job status updates
+    Clean implementation:
+    - State machine enforcement
+    - Planning prerequisite
+    - Sequence enforcement
+    - Execution timestamps
+    - Auto-advance workflow
+    - Parent job status update
     """
 
     # ---------------------------------------------------
-    # 1. Fetch job operation
+    # 1️⃣ Fetch operation
     # ---------------------------------------------------
     job_op = JOB_OPERATIONS_TABLE.get(job_operation_id)
     if not job_op:
@@ -214,7 +214,7 @@ def update_job_operation_status(
     current_status = job_op["status"]
 
     # ---------------------------------------------------
-    # 2. Validate state transition
+    # 2️⃣ State machine validation
     # ---------------------------------------------------
     if not is_valid_status_transition(current_status, new_status):
         raise ValueError(
@@ -222,137 +222,124 @@ def update_job_operation_status(
         )
 
     # ---------------------------------------------------
-    # 3. SCRUM 31: Planning Prerequisite Check
-    # "Operation can’t start unless machine+shift+date are assigned"
-    # We check this only when starting fresh (not when resuming)
+    # 3️⃣ Planning prerequisite (for starting only)
     # ---------------------------------------------------
     if new_status == OP_STATUS_IN_PROGRESS and current_status != OP_STATUS_PAUSED:
         if not job_op.get("machine_id"):
             raise ValueError("Cannot start operation: Machine not assigned (Planning required)")
 
     # ---------------------------------------------------
-    # 4. SCRUM 28: Sequence enforcement
+    # 4️⃣ Sequence enforcement
     # ---------------------------------------------------
     if new_status == OP_STATUS_IN_PROGRESS and not override_sequence:
-        job_id = job_op["job_id"]
-        seq = job_op["sequence_number"]
-
-        # If this is not the first operation, check previous op
-        if seq > 1:
+        if job_op["sequence_number"] > 1:
             prev_ops = [
                 op for op in JOB_OPERATIONS_TABLE.values()
-                if op["job_id"] == job_id
-                and op["sequence_number"] == seq - 1
+                if op["job_id"] == job_op["job_id"]
+                and op["sequence_number"] == job_op["sequence_number"] - 1
             ]
-
-            if not prev_ops:
-                raise ValueError("Previous operation not found")
-
-            prev_op = prev_ops[0]
-
-            if prev_op["status"] != OP_STATUS_COMPLETED:
-                raise ValueError(
-                    "Previous operation must be COMPLETED before starting this one"
-                )
+            if not prev_ops or prev_ops[0]["status"] != OP_STATUS_COMPLETED:
+                raise ValueError("Previous operation must be COMPLETED first")
 
     # ---------------------------------------------------
-    # 5. SCRUM 28: Quantity & Completion Validations
+    # 5️⃣ Completion quantity validation
     # ---------------------------------------------------
     if new_status == OP_STATUS_COMPLETED:
         if quantity_completed is None:
             raise ValueError("quantity_completed is required when completing")
-
         if quantity_completed < 0:
             raise ValueError("quantity_completed cannot be negative")
 
-        if quantity_rejected is None:
-            quantity_rejected = 0
-
+        quantity_rejected = quantity_rejected or 0
         if quantity_rejected < 0:
             raise ValueError("quantity_rejected cannot be negative")
 
-        # Rework validation
         if rework_flag and not rework_note:
             raise ValueError("rework_note is required when rework_flag is true")
 
-    # ---------------------------------------------------
-    # 6. SCRUM 31: Timestamp & Audit Handling
-    # ---------------------------------------------------
-
     now = datetime.utcnow().isoformat()
 
-    # Case A: STARTING (Fresh)
+    # ---------------------------------------------------
+    # 6️⃣ Timestamp handling
+    # ---------------------------------------------------
     if new_status == OP_STATUS_IN_PROGRESS and current_status != OP_STATUS_PAUSED:
-        if not job_op.get("actual_start_time"):
-            job_op["actual_start_time"] = now
+        job_op["actual_start_time"] = now
         job_op["started_by"] = user_id
 
-    # Case B: PAUSING
-    if new_status == OP_STATUS_PAUSED:
+    elif new_status == OP_STATUS_PAUSED:
         job_op["paused_at"] = now
         job_op["paused_by"] = user_id
 
-    # Case C: RESUMING
-    if new_status == OP_STATUS_IN_PROGRESS and current_status == OP_STATUS_PAUSED:
+    elif new_status == OP_STATUS_IN_PROGRESS and current_status == OP_STATUS_PAUSED:
         job_op["resumed_at"] = now
         job_op["resumed_by"] = user_id
 
-    # Case D: COMPLETING
-    if new_status == OP_STATUS_COMPLETED:
+    elif new_status == OP_STATUS_COMPLETED:
         job_op["actual_end_time"] = now
         job_op["completed_by"] = user_id
-
-        # Persist quantities
         job_op["quantity_completed"] = quantity_completed
-        job_op["quantity_rejected"] = quantity_rejected or 0
+        job_op["quantity_rejected"] = quantity_rejected
 
-        if rework_flag:
-            job_op["rework_flag"] = True
-            job_op["rework_note"] = rework_note
-
-    # Update status (single source of truth)
+    # ---------------------------------------------------
+    # 7️⃣ Update status
+    # ---------------------------------------------------
     job_op["status"] = new_status
 
     # ---------------------------------------------------
-    # 7. Update parent job status
+    # 8️⃣ SCRUM 33 – Auto-Advance Workflow
     # ---------------------------------------------------
-    from app.routes.jobs import JOBS_TABLE  # temporary import
+    if new_status == OP_STATUS_COMPLETED:
+
+        next_ops = [
+            op for op in JOB_OPERATIONS_TABLE.values()
+            if op["job_id"] == job_op["job_id"]
+            and op["sequence_number"] == job_op["sequence_number"] + 1
+        ]
+
+        if next_ops:
+            next_op = next_ops[0]
+
+            if (
+                next_op.get("machine_id")
+                and next_op.get("shift_id")
+                and next_op.get("planned_start_date")
+                and next_op.get("planned_end_date")
+            ):
+                next_op["status"] = OP_STATUS_READY
+            else:
+                next_op["status"] = OP_STATUS_NOT_STARTED
+                next_op["needs_planning"] = True
+
+    # ---------------------------------------------------
+    # 9️⃣ Parent Job Status Update
+    # ---------------------------------------------------
+    from app.routes.jobs import JOBS_TABLE
     job = JOBS_TABLE.get(job_op["job_id"])
 
     if job:
-        # Fetch all operations for this job
         all_ops = [
             op for op in JOB_OPERATIONS_TABLE.values()
             if op["job_id"] == job["job_id"]
         ]
 
-        # If any operation is IN_PROGRESS → job IN_PROGRESS
-        if any(op["status"] == OP_STATUS_IN_PROGRESS for op in all_ops):
+        if all(op["status"] == OP_STATUS_COMPLETED for op in all_ops):
+            job["status"] = "COMPLETED"
+        elif any(op["status"] == OP_STATUS_IN_PROGRESS for op in all_ops):
             job["status"] = "IN_PROGRESS"
 
-        # If ALL operations are COMPLETED → job COMPLETED
-        elif all(op["status"] == OP_STATUS_COMPLETED for op in all_ops):
-            job["status"] = "COMPLETED"
-
-        # Otherwise job might be NOT_STARTED or partially active
         job["updated_at"] = now
 
-    # ---------------------------------------------------
-    # 8. Audit logging + response
-    # ---------------------------------------------------
     logger.info(
         "OP_STATUS_CHANGED",
         extra={
-            "event": "OP_STATUS_CHANGED",
             "job_operation_id": job_operation_id,
             "old_status": current_status,
             "new_status": new_status,
-            "user_id": user_id,  # <--- Audit who made the change
+            "user_id": user_id,
         },
     )
 
     return job_op
-
 
 
 

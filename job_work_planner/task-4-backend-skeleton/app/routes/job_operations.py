@@ -263,3 +263,34 @@ def record_production(
 
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+    
+
+
+# -------------------------------------------------------
+# GET Single Job Operation
+# GET /job-operations/{job_operation_id}
+# -------------------------------------------------------
+
+from app.core.job_operations_service import JOB_OPERATIONS_TABLE
+
+
+@router.get("/{job_operation_id}")
+def get_job_operation(
+    job_operation_id: str,
+    request: Request,
+):
+    """
+    Fetch a single job operation.
+    Useful for debugging and UI stage tracking.
+    """
+
+    # Authentication
+    if not hasattr(request.state, "user"):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    job_op = JOB_OPERATIONS_TABLE.get(job_operation_id)
+
+    if not job_op:
+        raise HTTPException(status_code=404, detail="Job operation not found")
+
+    return job_op    
