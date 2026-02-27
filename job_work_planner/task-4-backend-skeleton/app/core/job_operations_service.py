@@ -20,47 +20,51 @@ Responsibilities:
 from datetime import datetime
 from typing import List, Dict
 import logging
+from app.core.audit_service import log_audit_event
+from app.core.notification_service import create_notification
+from app.db.mock_db import (
+    MACHINES_TABLE,
+    SHIFTS_TABLE,
+    PARTS_TABLE,
+    OPERATIONS_TABLE,
+    JOB_OPERATIONS_TABLE,
+    JOB_OPERATION_PRODUCTION_TABLE,
+    JOB_OPERATION_RESCHEDULE_TABLE
+)
 
 logger = logging.getLogger("jobwork-backend")
 
-# -----------------------------
-# MOCK DATABASE TABLES
-# (Replace with DynamoDB later)
-# -----------------------------
 
-MACHINES_TABLE = {
-    "machine-1": {"machine_id": "machine-1", "tenant_id": "tenant-1"},
-    "machine-2": {"machine_id": "machine-2", "tenant_id": "tenant-1"},
-}
+class CapacityConflictError(Exception):
+    """Custom exception to return 409 Conflict with details."""
+    def __init__(self, message: str, clashes: list):
+        self.message = message
+        self.clashes = clashes
+        super().__init__(self.message)
 
-SHIFTS_TABLE = {
-    "shift-A": {"shift_id": "shift-A", "tenant_id": "tenant-1"},
-    "shift-B": {"shift_id": "shift-B", "tenant_id": "tenant-1"},
-}
+# Configurable capacity rule (MVP)
+MAX_OPS_PER_SHIFT = 3
 
-PARTS_TABLE = {
-    "part-1": {
-        "part_id": "part-1",
-        "tenant_id": "tenant-1",
-        "default_operations_route": ["op-cut", "op-drill", "op-paint"],
-    }
-}
+def check_capacity_conflicts(machine_id: str, shift_id: str) -> None:
+    """
+    Checks for capacity conflicts for a given machine and shift.
+    """
+    current_operations = [
+        op for op in JOB_OPERATIONS_TABLE.values()
+        if op["machine_id"] == machine_id and op["shift_id"] == shift_id
+    ]
 
-OPERATIONS_TABLE = {
-    "op-cut": {"operation_id": "op-cut", "name": "Cut"},
-    "op-drill": {"operation_id": "op-drill", "name": "Drill"},
-    "op-paint": {"operation_id": "op-paint", "name": "Paint"},
-}
+    if len(current_operations) >= MAX_OPS_PER_SHIFT:
+        clashes = [op["job_operation_id"] for op in current_operations]
+        raise CapacityConflictError(
+            message="Capacity limit exceeded",
+            clashes=clashes
+        )
 
-# job_operation_id -> record
-JOB_OPERATIONS_TABLE: Dict[str, Dict] = {}
 
-# -------------------------------------------------------
-# SCRUM 32: Production Entries Table
-# -------------------------------------------------------
 
-# job_operation_id -> list of production entries
-JOB_OPERATION_PRODUCTION_TABLE: Dict[str, List[Dict]] = {}
+
+
 
 # -------------------------------------------------------
 # STEP 1: Route Validation
@@ -187,6 +191,7 @@ def update_job_operation_status(
     job_operation_id: str,
     new_status: str,
     *,
+    tenant_id: str,   # 👈 NEW: Require tenant_id
     user_id: str,
     quantity_completed: int | None = None,
     quantity_rejected: int | None = None,
@@ -194,24 +199,17 @@ def update_job_operation_status(
     rework_note: str | None = None,
     override_sequence: bool = False,
 ):
-    """
-    Clean implementation:
-    - State machine enforcement
-    - Planning prerequisite
-    - Sequence enforcement
-    - Execution timestamps
-    - Auto-advance workflow
-    - Parent job status update
-    """
-
-    # ---------------------------------------------------
     # 1️⃣ Fetch operation
-    # ---------------------------------------------------
     job_op = JOB_OPERATIONS_TABLE.get(job_operation_id)
     if not job_op:
         raise ValueError("Job operation not found")
 
+    # 👇 NEW: STRICT TENANT CHECK
+    if job_op.get("tenant_id") != tenant_id:
+        raise ValueError("Unauthorized access to job operation")
+  
     current_status = job_op["status"]
+    # ..............
 
     # ---------------------------------------------------
     # 2️⃣ State machine validation
@@ -244,24 +242,52 @@ def update_job_operation_status(
     # ---------------------------------------------------
     # 5️⃣ Completion quantity validation
     # ---------------------------------------------------
+    # ---------------------------------------------------
+    # STEP 4: Quantity & Completion Validations
+    # ---------------------------------------------------
     if new_status == OP_STATUS_COMPLETED:
+
         if quantity_completed is None:
-            raise ValueError("quantity_completed is required when completing")
+                raise ValueError("quantity_completed is required when completing an operation")
+
         if quantity_completed < 0:
-            raise ValueError("quantity_completed cannot be negative")
+                raise ValueError("quantity_completed cannot be negative")
 
         quantity_rejected = quantity_rejected or 0
         if quantity_rejected < 0:
-            raise ValueError("quantity_rejected cannot be negative")
+                raise ValueError("quantity_rejected cannot be negative")
 
+            # 👇 NEW: REAL JOB QUANTITY ENFORCEMENT
+        from app.db.mock_db import JOBS_TABLE # Make sure to use the new mock_db!
+            
+        parent_job = JOBS_TABLE.get(job_op["job_id"])
+        if not parent_job:
+                raise ValueError("Parent job not found")
+                
+        job_qty = parent_job["quantity"]
+
+        if quantity_completed > job_qty:
+                raise ValueError(f"quantity_completed ({quantity_completed}) exceeds total job quantity ({job_qty})")
+
+        if (quantity_completed + quantity_rejected) > job_qty:
+                raise ValueError(f"Total produced + rejected exceeds job quantity ({job_qty})")
+
+            # 🔁 Rework validation
         if rework_flag and not rework_note:
-            raise ValueError("rework_note is required when rework_flag is true")
+                raise ValueError("rework_note is required when rework_flag is true")
 
+    # ---------------------------------------------------
+    # 6️⃣ Timestamp handling
+    # ---------------------------------------------------
+    # 👇 Add this line right here!
     now = datetime.utcnow().isoformat()
 
     # ---------------------------------------------------
     # 6️⃣ Timestamp handling
     # ---------------------------------------------------
+    if new_status == OP_STATUS_IN_PROGRESS and current_status != OP_STATUS_PAUSED:
+        job_op["actual_start_time"] = now
+        job_op["started_by"] = user_id
     if new_status == OP_STATUS_IN_PROGRESS and current_status != OP_STATUS_PAUSED:
         job_op["actual_start_time"] = now
         job_op["started_by"] = user_id
@@ -306,6 +332,18 @@ def update_job_operation_status(
                 and next_op.get("planned_end_date")
             ):
                 next_op["status"] = OP_STATUS_READY
+                
+                # ========================================================
+                # 👇 NEW: NOTIFICATION TRIGGER (Operation unblocked!)
+                # ========================================================
+                create_notification(
+                    tenant_id=job_op["tenant_id"],
+                    user_id=None, # Broadcasts to all Supervisors/Planners
+                    notif_type="READY",
+                    message=f"Operation {next_op['operation_id']} for Job {job_op['job_id']} is READY to start.",
+                    entity_ref=next_op["job_operation_id"]
+                )
+                
             else:
                 next_op["status"] = OP_STATUS_NOT_STARTED
                 next_op["needs_planning"] = True
@@ -313,7 +351,7 @@ def update_job_operation_status(
     # ---------------------------------------------------
     # 9️⃣ Parent Job Status Update
     # ---------------------------------------------------
-    from app.routes.jobs import JOBS_TABLE
+    from app.db.mock_db import JOBS_TABLE
     job = JOBS_TABLE.get(job_op["job_id"])
 
     if job:
@@ -339,13 +377,30 @@ def update_job_operation_status(
         },
     )
 
+    # WRITE TO THE AUDIT TRAIL 
+    log_audit_event(
+        tenant_id=job_op["tenant_id"],
+        entity_type="JOB_OPERATION",
+        entity_id=job_operation_id,
+        action="STATUS_CHANGED",
+        user_id=user_id,
+        before={"status": current_status},
+        after={
+            "status": new_status, 
+            "quantity_completed": quantity_completed,
+            "quantity_rejected": quantity_rejected
+        }
+    )
+
     return job_op
 
 
-
+# -------------------------------------------------------
+# UNIFIED PLANNING & RESCHEDULING SERVICE (SCRUM 29 + 34)
+# -------------------------------------------------------
 
 # -------------------------------------------------------
-# SCRUM 29: Plan Job Operation (Service Layer)
+# UNIFIED PLANNING & RESCHEDULING SERVICE (SCRUM 29 + 34)
 # -------------------------------------------------------
 
 def plan_job_operation_service(
@@ -354,33 +409,48 @@ def plan_job_operation_service(
     shift_id: str,
     planned_start_date: str,
     planned_end_date: str,
+    force: bool = False,
+    reschedule_reason: str | None = None,
+    ignore_conflicts: bool = False, 
+    *,
+    tenant_id: str, # 👈 NEW: Require tenant_id
 ):
-    """
-    SCRUM 29 – Plan Job Operation
-    """
-    conflict_warning = None
-
-    # 1. Fetch job operation
     job_op = JOB_OPERATIONS_TABLE.get(job_operation_id)
     if not job_op:
         raise ValueError("Job operation not found")
 
-    tenant_id = job_op.get("tenant_id")
+    # 👇 NEW: STRICT TENANT CHECK
+    if job_op.get("tenant_id") != tenant_id:
+        raise ValueError("Unauthorized access to job operation")
+    
 
-    # 2. Validate machine & shift (tenant isolation)
+    current_status = job_op["status"]
+
+    # 👇 NEW: STRICT STATE MACHINE GUARDS FOR PLANNING
+    if current_status in {"COMPLETED", "CANCELLED"}:
+        raise ValueError(f"Cannot reschedule or plan an operation that is {current_status}")
+    # ... (keep the rest of the function exactly as it is) ...
+
+    # --- 1. Rescheduling Guards ---
+    if current_status == "COMPLETED":
+        raise ValueError("Cannot reschedule a COMPLETED operation")
+
+    if current_status in ["IN_PROGRESS", "PAUSED"]:
+        if not force:
+            raise ValueError("Operation is active. Set force=true and provide reason.")
+        if not reschedule_reason:
+            raise ValueError("Reschedule reason is required for active operations.")
+
+    # --- 2. Standard Validation ---
+    tenant_id = job_op.get("tenant_id")
     machine = MACHINES_TABLE.get(machine_id)
-    if not machine:
-        raise ValueError("Machine not found")
     shift = SHIFTS_TABLE.get(shift_id)
-    if not shift:
+
+    if not machine or machine["tenant_id"] != tenant_id:
+        raise ValueError("Machine not found")
+    if not shift or shift["tenant_id"] != tenant_id:
         raise ValueError("Shift not found")
 
-    if machine["tenant_id"] != tenant_id:
-        raise ValueError("Machine does not belong to tenant")
-    if shift["tenant_id"] != tenant_id:
-        raise ValueError("Shift does not belong to tenant")
-
-    # 3. Validate planning dates
     try:
         start_date = datetime.fromisoformat(planned_start_date)
         end_date = datetime.fromisoformat(planned_end_date)
@@ -390,26 +460,64 @@ def plan_job_operation_service(
     if start_date > end_date:
         raise ValueError("planned_start_date cannot be after planned_end_date")
 
-    # 4. Detect conflicts (SOFT)
-    for op in JOB_OPERATIONS_TABLE.values():
-        if op["job_operation_id"] == job_operation_id:
-            continue
-        if op.get("machine_id") != machine_id:
-            continue
+    # -------------------------------------------------------
+    # CAPACITY & CONFLICT VALIDATION
+    # -------------------------------------------------------
+    clashing_ops = []
+    
+    # Scan for existing operations on the same machine & shift
+    for other_op in JOB_OPERATIONS_TABLE.values():
+        if other_op["job_operation_id"] == job_operation_id:
+            continue # Skip self
+            
+        if other_op.get("machine_id") == machine_id and other_op.get("shift_id") == shift_id:
+            other_start_str = other_op.get("planned_start_date")
+            other_end_str = other_op.get("planned_end_date")
+            
+            if other_start_str and other_end_str:
+                other_start = datetime.fromisoformat(other_start_str)
+                other_end = datetime.fromisoformat(other_end_str)
+                
+                # Check for date overlap
+                if start_date <= other_end and end_date >= other_start:
+                    clashing_ops.append({
+                        "job_operation_id": other_op["job_operation_id"],
+                        "job_id": other_op["job_id"],
+                        "status": other_op["status"]
+                    })
 
-        existing_start = op.get("planned_start_date")
-        existing_end = op.get("planned_end_date")
-        if not existing_start or not existing_end:
-            continue
+    # Enforce capacity rule unless overridden
+    if len(clashing_ops) >= MAX_OPS_PER_SHIFT:
+        if not ignore_conflicts:
+            
+            # ========================================================
+            # 👇 NEW: NOTIFICATION TRIGGER (Capacity limit hit!)
+            # ========================================================
+            create_notification(
+                tenant_id=tenant_id,
+                user_id=None, # Broadcast to planners/supervisors
+                notif_type="CONFLICT",
+                message=f"Capacity overload detected on {machine_id} during planning. Limit: {MAX_OPS_PER_SHIFT}",
+                entity_ref=job_operation_id
+            )
+            
+            raise CapacityConflictError(
+                message=f"Machine capacity overloaded. Max {MAX_OPS_PER_SHIFT} operations per shift.",
+                clashes=clashing_ops
+            )
+            
+        if not reschedule_reason:
+            raise ValueError("A reason is required when ignoring capacity conflicts.")
 
-        existing_start_dt = datetime.fromisoformat(existing_start)
-        existing_end_dt = datetime.fromisoformat(existing_end)
 
-        if start_date <= existing_end_dt and end_date >= existing_start_dt:
-            conflict_warning = "Machine has overlapping planned operation in this time window"
-            break
+    # -------------------------------------------------------
+    # Apply Updates & Audit
+    # -------------------------------------------------------
+    old_plan = {
+        "machine": job_op.get("machine_id"),
+        "start": job_op.get("planned_start_date")
+    }
 
-    # 5. Update planning fields
     now = datetime.utcnow().isoformat()
     job_op.update({
         "machine_id": machine_id,
@@ -419,31 +527,46 @@ def plan_job_operation_service(
         "updated_at": now,
     })
 
-    # 6. Audit log
+    event_type = "OP_PLANNED" if current_status == "NOT_STARTED" else "OP_RESCHEDULED"
+    
     logger.info(
-        "OP_PLANNED",
+        event_type,
         extra={
-            "event": "OP_PLANNED",
             "job_operation_id": job_operation_id,
-            "machine_id": machine_id,
-            "shift_id": shift_id,
+            "old_plan": old_plan,
+            "new_machine": machine_id,
+            "reason": reschedule_reason,
+            "forced": force,
+            "ignored_conflicts": ignore_conflicts
         },
     )
 
-    # 7. Response
-    if conflict_warning:
-        return {"job_operation": job_op, "warning": conflict_warning}
+    # WRITE TO THE AUDIT TRAIL
+    log_audit_event(
+        tenant_id=job_op["tenant_id"],
+        entity_type="JOB_OPERATION",
+        entity_id=job_operation_id,
+        action=event_type,
+        user_id="supervisor-user-id", # (Ideally pass user_id down from router)
+        before=old_plan,
+        after={
+            "machine": machine_id,
+            "shift": shift_id,
+            "start": planned_start_date,
+            "reason": reschedule_reason
+        }
+    )
 
-    return job_op 
+    return job_op
 
-
-
-
+  
+  
+ 
+ 
 
 # -------------------------------------------------------
 # SCRUM 32 – Add Production Entry (Service Layer)
 # -------------------------------------------------------
-
 def add_production_entry_service(
     *,
     job_operation_id: str,
@@ -451,6 +574,7 @@ def add_production_entry_service(
     scrap_qty: int,
     rework_qty: int,
     operator_id: str,
+    tenant_id: str,  # 👈 NEW: Added this parameter!
     notes: str | None = None,
 ):
     """
@@ -463,6 +587,12 @@ def add_production_entry_service(
     job_op = JOB_OPERATIONS_TABLE.get(job_operation_id)
     if not job_op:
         raise ValueError("Job operation not found")
+
+    # 👇 NEW: STRICT TENANT CHECK
+    if job_op.get("tenant_id") != tenant_id:
+        raise ValueError("Unauthorized access to job operation")
+
+    # ...  ...
 
     # ---------------------------------------------------
     # 2. Prevent editing if COMPLETED
@@ -493,7 +623,7 @@ def add_production_entry_service(
     # ---------------------------------------------------
     # 5. Job Quantity Validation (STRICT RULE)
     # ---------------------------------------------------
-    from app.routes.jobs import JOBS_TABLE
+    from app.db.mock_db import JOBS_TABLE
 
     job = JOBS_TABLE.get(job_op["job_id"])
     if not job:
@@ -520,7 +650,7 @@ def add_production_entry_service(
 
     # Save entry
     existing_entries.append(production_record)
-    JOB_OPERATION_PRODUCTION_TABLE[job_operation_id] = existing_entries
+    JOB_OPERATION_PRODUCTION_TABLE[job_operation_id] = existing_entries 
 
     # ---------------------------------------------------
     # 7. Update computed totals on operation

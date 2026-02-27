@@ -12,7 +12,7 @@ def get_logger(name: str = "jobwork-backend") -> logging.Logger:
     """
  
     logger = logging.getLogger(name)
-    logger.setLevel(logging.INFO)
+    logger.setLevel(logging.INFO)  
  
     if not logger.handlers:
         formatter = logging.Formatter(

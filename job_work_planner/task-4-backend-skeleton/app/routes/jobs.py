@@ -24,6 +24,9 @@ import logging
 # ---------------------------------------------------------------
 from app.core.job_operations_service import create_job_operations
 
+
+from app.db.mock_db import JOBS_TABLE, MOCK_CUSTOMERS, PARTS_TABLE as MOCK_PARTS
+
 # ---------------------------------------------------------------
 # Router
 # ---------------------------------------------------------------
@@ -38,44 +41,23 @@ router = APIRouter(
 logger = logging.getLogger("jobwork-backend")
 
 # ---------------------------------------------------------------
-# MOCK DATABASES (TEMPORARY – replaced by DB later)
-# ---------------------------------------------------------------
-JOBS_TABLE = {}  # job_id -> job header
-
-# Mock master data (simulating DB validation)
-MOCK_CUSTOMERS = {
-    "cust-1": {"tenant_id": "tenant-1"}
-}
-
-MOCK_PARTS = {
-    "part-1": {"tenant_id": "tenant-1"}
-}
-
-# ---------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------
 ALLOWED_PRIORITY = {"LOW", "MEDIUM", "HIGH"}
 ALLOWED_CREATOR_ROLES = {"OWNER", "SUPERVISOR"}
 
-# ---------------------------------------------------------------
+
+# =======================================================
 # POST /jobs
-# ---------------------------------------------------------------
+# =======================================================
 @router.post("/", status_code=status.HTTP_201_CREATED)
 def create_job(payload: dict, request: Request):
     """
     POST /jobs
-
-    FLOW:
-    1. Authenticate user
-    2. Validate job header input (Scrum 24)
-    3. Create job header
-    4. Auto-generate job operations (Scrum 25)
-    5. Return job + operations
+    Allowed Roles: PLANNER, SUPERVISOR, ADMIN
     """
 
-    # -----------------------------------------------------------
     # 1. Authentication & Context
-    # -----------------------------------------------------------
     if not hasattr(request.state, "user"):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -85,17 +67,18 @@ def create_job(payload: dict, request: Request):
     user = request.state.user
     tenant_id = user["tenant_id"]
     created_by = user["user_id"]
-    role = user.get("role", "OWNER")  # mock default role
+    role = user.get("role") 
 
     # -----------------------------------------------------------
-    # 2. RBAC (Role-Based Access Control)
+    # 👇 NEW: Strict RBAC for Job Creation
     # -----------------------------------------------------------
-    if role not in ALLOWED_CREATOR_ROLES:
+    if role not in {"PLANNER", "SUPERVISOR", "ADMIN", "OWNER"}:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Forbidden"
+            detail="Forbidden: Operators cannot create new jobs. Only Planners, Supervisors, or Admins are allowed."
         )
 
+    
     # -----------------------------------------------------------
     # 3. Read request payload
     # -----------------------------------------------------------
@@ -465,7 +448,7 @@ def get_job_detail(job_id: str, request: Request):
     # ---------------------------------------------------------------
     # 3. Fetch job operations (Scrum 25 data)
     # ---------------------------------------------------------------
-    from app.core.job_operations_service import JOB_OPERATIONS_TABLE
+    from app.db.mock_db import JOB_OPERATIONS_TABLE
 
     operations = [
         op for op in JOB_OPERATIONS_TABLE.values()
@@ -506,4 +489,35 @@ def get_job_detail(job_id: str, request: Request):
     }
 
 
+# app/routes/jobs.py (Add to the bottom)
 
+from app.core.audit_service import get_audit_trail
+
+# =======================================================
+# AUDIT TRAIL
+# GET /jobs/{job_id}/audit
+# =======================================================
+@router.get("/{job_id}/audit")
+def get_job_audit(
+    job_id: str,
+    request: Request
+):
+    """
+    Fetch the immutable audit trail for a specific Job.
+    """
+    if not hasattr(request.state, "user"):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    tenant_id = request.state.user["tenant_id"]
+
+    # Optional: Verify Job exists and belongs to tenant here
+    # job = JOBS_TABLE.get(job_id)
+    # if not job or job["tenant_id"] != tenant_id: raise 404
+
+    trail = get_audit_trail(
+        tenant_id=tenant_id,
+        entity_type="JOB",
+        entity_id=job_id
+    )
+
+    return {"audit_trail": trail}

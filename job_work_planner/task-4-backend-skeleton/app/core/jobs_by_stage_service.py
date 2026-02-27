@@ -27,8 +27,7 @@ logger = logging.getLogger("jobwork-backend")
 # -------------------------------------------------------
 # TEMP MOCK IMPORTS (replace with DB later)
 # -------------------------------------------------------
-from app.routes.jobs import JOBS_TABLE
-from app.core.job_operations_service import JOB_OPERATIONS_TABLE
+from app.db.mock_db import JOBS_TABLE, JOB_OPERATIONS_TABLE
 
 
 # -------------------------------------------------------

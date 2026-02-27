@@ -89,4 +89,4 @@ class JWTAuthMiddleware(BaseHTTPMiddleware):
         # -------------------------------------------------
         # 5. Continue request
         # -------------------------------------------------
-        return await call_next(request)
+        return await call_next(request)     

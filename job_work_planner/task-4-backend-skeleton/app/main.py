@@ -10,6 +10,9 @@ Responsibilities:
 """
 
 from fastapi import FastAPI
+from app.routes import planning
+from app.routes import metrics
+from app.routes import notifications
 
 # ---------------------------------------------------------
 # Routers
@@ -45,3 +48,6 @@ app.include_router(system.router)
 app.include_router(auth.router)
 app.include_router(jobs.router)
 app.include_router(job_operations.router)  # ✅ SCRUM 28 API
+app.include_router(planning.router)  
+app.include_router(metrics.router)         # 👈 NEW: Register metrics
+app.include_router(notifications.router)       # 👈 NEW: Register notifications
