@@ -31,7 +31,7 @@ class S3BucketStack(Stack):
         # ---------------------------------------------------------
         # Bucket name (environment-aware to avoid collisions)
         # ---------------------------------------------------------
-        bucket_name = f"jobwork-app-files-{ENV}"
+        bucket_name = bucket_name = f"jobwork-app-files-roshan-{ENV}"
 
         # ---------------------------------------------------------
         # Create PRIVATE S3 bucket with secure defaults
